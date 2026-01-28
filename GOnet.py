@@ -8,7 +8,8 @@ def GONet(deg_results_dict, species='mmusculus', out_dir='',lfc_up=0.5,lfc_down=
   '''
     test_dict = {}
     # Map species names to GSEAPY organism names
-    org_map = {'mmusculus': 'Mouse'}
+    org_map = {'mmusculus': 'Mouse',
+               'hsapiens': 'Human'}
     for group, result in deg_results_dict.items():
         test_dict[group] = {} 
         # Genes are stored as index values per DEG results dataframe
