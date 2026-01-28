@@ -8,8 +8,8 @@ def GONet(deg_results_dict, species='mmusculus', out_dir='',lfc_up=0.5,lfc_down=
     # Map species names to GSEAPY organism names
     org_map = {'mmusculus': 'Mouse'}
     for group, result in deg_results_dict.items():
-        test_dict[group] = {}  # Fixed: removed extra brace
-        # Genes are stored as index values per DEG dataframe
+        test_dict[group] = {} 
+        # Genes are stored as index values per DEG results dataframe
         gene_list = list(result.index)
         
         if remove_sex_genes == True:
@@ -51,7 +51,7 @@ def GONet(deg_results_dict, species='mmusculus', out_dir='',lfc_up=0.5,lfc_down=
                     cutoff = 0.05
                 )
                 test_dict[group][direction] = enr_res.res2d                
-                # networkx -> gephi step. Pvalue is added as a node attribute for gephi aesthetics downstream. 
+                # Pval added as a node attribute for gephi aesthetics downstream. (i.e., node size)
                 nodes, edges = gseapy.enrichment_map(enr_res.res2d, top_term=300, column='Adjusted P-value')
                 
                 network_table = edges[['src_name', 'targ_name', 'jaccard_coef', 'overlap_coef', 'overlap_genes']]
@@ -68,5 +68,3 @@ def GONet(deg_results_dict, species='mmusculus', out_dir='',lfc_up=0.5,lfc_down=
                 nx.write_gexf(G, f"{out_dir}/GOnet_{group}_{direction}.gexf")
 
     return test_dict
-
-test_gonet = GONet_lite(intra_wt_binned, species='mmusculus', out_dir='/home/dxm853/projects/regulon_analysis/redemption/1_12_26/GONet',lfc_up=0.5,lfc_down=-0.05)
