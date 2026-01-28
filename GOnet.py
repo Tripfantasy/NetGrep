@@ -2,7 +2,9 @@ def GONet(deg_results_dict, species='mmusculus', out_dir='',lfc_up=0.5,lfc_down=
   '''
   With a DEG analysis result dictionary where keys are group labels, and values are pandas dataframes, associate GO terms with differentially expressed genes. 
   Optionally remove sex-linked genes from the DEG pool, and fine-tune bidirectional log2foldchange. Current default significance threshold is adjusted pvalue of 0.05
-  Significance is treated as a node-attribute, and output is a .gexf-converted network edge table of connected terms to be visualized in Gephi.
+  Significance is treated as a node-attribute, and output is a .gexf-converted network edge table of connected terms to be visualized in Gephi. Currently supports mouse. 
+
+  Example minimum usage: GONet(result_dict, out_dir='~/GONet_test/out/')
   '''
     test_dict = {}
     # Map species names to GSEAPY organism names
