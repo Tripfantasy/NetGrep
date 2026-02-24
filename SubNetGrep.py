@@ -1,4 +1,4 @@
-def NetGrep_lite(regulon_object,adjacency_file, gene:str):
+def SubNetGrep(regulon_object,adjacency_file, gene:str):
     '''
     Parse GRN to find second-order subnetwork, includes TFs/regulons directly targetting gene, and important adjacencies.
     By default will filter adjacencies based on shared transcription factors. If no direct TF relationship is found, skips pruning.
