@@ -1,7 +1,45 @@
+def build_subnetwork(target_info, adj_regulators, query_gene, filename="subnetwork.gexf"):
+    '''
+    Build network for visualization in Gephi. Uses output from SubNetGrep.
+    '''
+    G = nx.DiGraph() 
+
+    # Add the Query Gene first
+    G.add_node(query_gene, category='Query', label=query_gene)
+
+    # TF:Query gene edges (Directed)
+    for tf, weight in target_info['TF'].items():
+        G.add_node(tf, category='TF', label=tf)
+        G.add_edge(tf, query_gene, weight=float(weight), interaction='Regulation')
+
+    # TF:Other targets (Directed)
+    for tf, targets in target_info['reg'].items():
+        for target_gene, weight in targets.items():
+            if target_gene != query_gene:
+                # Add node with attribute if it doesn't exist
+                if target_gene not in G:
+                    G.add_node(target_gene, category='Regulon_Member', label=target_gene)
+                G.add_edge(tf, target_gene, weight=float(weight), interaction='Regulation')
+
+    # Query gene: adjacency edges (Undirected)
+    for adj_gene, weight in target_info['adj']:
+        if adj_gene not in G:
+            G.add_node(adj_gene, category='Adjacency', label=adj_gene)
+        G.add_edge(query_gene, adj_gene, weight=float(weight), interaction='Association')
+        G.add_edge(adj_gene, query_gene, weight=float(weight), interaction='Association')
+
+    # Adjacency:Regulon (Directed)
+    for adj_gene, reg_name, weight in adj_regulators:
+        if reg_name not in G:
+            G.add_node(reg_name, category='TF', label=reg_name)
+        G.add_edge(reg_name, adj_gene, weight=float(weight), interaction='Regulation')
+
+    nx.write_gexf(G, filename)
+    print(f"Network exported to {filename}")
+
 def SubNetGrep(regulon_object,adjacency_file, gene:str):
     '''
-    Parse GRN to find second-order subnetwork, includes TFs/regulons directly targetting gene, and important adjacencies.
-    By default will filter adjacencies based on shared transcription factors. If no direct TF relationship is found, skips pruning.
+    Parse GRN to find second-order subnetwork, includes TFs/regulons directly targetting gene, co-regulated adjacencies to query gene, and additional regulons which target them. 
     '''
     # inititalize dictionary for storing all results
     target_info = {}
@@ -10,7 +48,7 @@ def SubNetGrep(regulon_object,adjacency_file, gene:str):
     # Target info for direct targets of query gene are stored. 
     target_info['reg'] = {}
     for regulon in regulon_object:
-        if gene in regulon.gene2weight.keys():
+        if gene in regulon.gene2weight:
             target_info['TF'][regulon.name] = regulon.gene2weight[gene]
             target_info['reg'][regulon.name] = {}
             for target_gene , weight in regulon.gene2weight.items():
@@ -29,28 +67,14 @@ def SubNetGrep(regulon_object,adjacency_file, gene:str):
                         target_info['adj'].append((line[1],line[2]))
                 else:
                     target_info['adj'].append((line[1],line[2]))
+    adjacencies = [x[0] for x in target_info['adj']]
+    # Find any regulons which taget the retained adjacencies. 
+    adj_regulators = []
+    for adj in adjacencies:
+        for regulon in regulon_object:
+            if adj in regulon.gene2weight:
+                adj_regulators.append((adj,regulon.name,regulon.gene2weight[adj]))
+                 
     # Build the network edge table
-    build_subnetwork(target_info, query_gene=gene, filename=f"/~/{gene}_subnetwork.gexf")
-
-def build_subnetwork(target_info, query_gene, filename="subnetwork.gexf"):
-    '''
-    Builds a network from NetGrep result dictionary. Last step of NetGrep function. 
-    '''
-    G = nx.DiGraph() 
-
-    # TF:Query gene edges
-    for tf, weight in target_info['TF'].items():
-        G.add_edge(tf, query_gene, weight=float(weight), type='direct_target')
-
-    # TF:Other targets
-    for tf, targets in target_info['reg'].items():
-        for target_gene, weight in targets.items():
-            if target_gene != query_gene: # Avoid duplicating the direct link
-                G.add_edge(tf, target_gene, weight=float(weight), type='regulon_member')
-
-    # Query gene: adjacency edges
-    for adj_gene, weight in target_info['adj']:
-        G.add_edge(query_gene, adj_gene, weight=float(weight), type='adjacency_validated')
-
-    nx.write_gexf(G, filename)
-    print(f"Network exported to {filename}")
+    build_subnetwork(target_info, query_gene=gene, filename=f"/~/{gene}_subnetwork.gexf",adj_regulators=adj_regulators)                                
+  
