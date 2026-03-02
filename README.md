@@ -6,4 +6,4 @@ Checklist:
 - [x] **SubNetGrep**: Examine a sub-network surrounding any gene in the network.
 - [ ] **InflectionFilter**: Filter regulon object based on target gene weight distribution.
 - [ ] **FindTF**: Query a gene by symbol and list what TFs target it in the network.
-- [ ] GUI Adaptation for interactive network analysis. (Flask)
+- [ ] GUI Adaptation for interactive network analysis. (Dash/Cytoscape)
