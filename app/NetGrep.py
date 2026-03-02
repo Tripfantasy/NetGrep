@@ -7,7 +7,7 @@ import dash_cytoscape as cyto
 
 app = Dash(__name__)
 
-# --- Terminal "Slate & Neon" Theme ---
+# Color theme
 theme = {
     'bg': '#0a0b0d',         
     'panel': '#14171a',      
@@ -142,7 +142,7 @@ app.layout = html.Div(style={'display': 'flex', 'height': '100vh'}, children=[
     dcc.Store(id='stored-data')
 ])
 
-# --- Logic ---
+# Callbacks / Functions
 
 @app.callback(
     [Output('mapping-container', 'style'), Output('source-dropdown', 'options'), Output('target-dropdown', 'options'), Output('weight-dropdown', 'options'), Output('stored-data', 'data')],
