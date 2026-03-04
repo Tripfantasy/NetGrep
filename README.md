@@ -1,5 +1,6 @@
-# <img width="256" height="64" alt="image" src="https://github.com/user-attachments/assets/5038acaa-3ec2-4065-b6d6-40fbf869182d" />
+<img width="1239" height="726" alt="image" src="https://github.com/user-attachments/assets/465532a0-a83a-4220-ab98-cd1d5e49b9b4" />
 
+# NetGrep
 Collection of functions for large-scale downstream gene regulatory network analysis. Functions are currently adapted for use with pySCENIC.
 
 Checklist:
