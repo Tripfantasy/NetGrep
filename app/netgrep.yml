@@ -45,5 +45,3 @@ dependencies:
     - dearpygui==2.2
     - pandas==3.0.1
     - pyarrow==23.0.1
-
-prefix: "/Users/dxm853/micromamba/envs/netgrep"
