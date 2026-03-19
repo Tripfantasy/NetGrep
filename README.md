@@ -18,7 +18,7 @@ Collection of functions for large-scale downstream gene regulatory network analy
 - For using pre-existing functions in python to generate .gexf files to visualize in Gephi. [See Functions](https://github.com/Tripfantasy/NetGrep/tree/main/functions)
 - For using the standalone app with built in network visualizer.
     - Clone the github repository
-    - Use the environment .yml to to create a conda environment/equivalent with the required packages. Activate environment.
+    - Use the netgrep .yml to to create a conda environment/equivalent with the required packages. Activate environment.
     - launch the standalone_app.py via the following terminal command:
       
       ```
