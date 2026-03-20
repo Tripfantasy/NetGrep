@@ -9,6 +9,11 @@ import json
 import threading   # NEW
 import csv
 import os
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.collections import LineCollection
 
 W, H      = 1440, 920
 SIDEBAR_W = 380
@@ -154,7 +159,7 @@ class NetGrep:
         return set()
     
     def convert_pkl_to_json(self):
-        """Convert PKL data to a lightweight JSON-like structure and store it in memory."""
+        """Flatten regulon objects into a plain dict for fast lookups at runtime."""
         self.regulons_json = {}
         for name, reg in self.regulons.items():
             tf = self._tf_name(reg, name)
@@ -165,10 +170,9 @@ class NetGrep:
                 "targets": list(targets),
                 "gene_weights": gene_weights
             }
-        print("PKL data converted to JSON-like structure and stored in memory.")
 
     def _enter_subgraph_mode(self):
-        """Isolate the highlighted regulon as a subgraph and visualise it alone."""
+        """Restrict the view to a single regulon's TF and its direct targets."""
         name = self.highlighted_tf
         if not name or name not in self.regulons_json:
             return
@@ -193,32 +197,25 @@ class NetGrep:
             dpg.configure_item(self._subgraph_btn, label="Exit Subgraph",
                                callback=self._exit_subgraph_mode)
 
-        # Weight-driven radial layout Collect (target, weight) pairs
+        # Radial layout: highest-weight targets placed closest to the TF centre
         gene_weights = []
         for gene in sorted(targets):
             d = sub.get_edge_data(name, gene)
             w = float(d.get('w', 0)) if d else 0.0
             gene_weights.append((gene, w))
 
-        # higher weight → smaller radius
         weights_arr = np.array([w for _, w in gene_weights], dtype=float)
         w_min, w_max = weights_arr.min(), weights_arr.max()
         w_range = w_max - w_min if w_max > w_min else 1.0
 
         n_tgt = max(len(targets), 1)
-        R_max = max(2.5, n_tgt * 0.20)   
-        R_min = R_max * 0.20 # highest-weight targets
+        R_max = max(2.5, n_tgt * 0.20)
+        R_min = R_max * 0.20
 
         pos = {name: np.array([0.0, 0.0])}
-
-        # sort by weight descending so highest-weight get smaller radii
-        gene_weights_sorted = sorted(gene_weights, key=lambda x: x[1], reverse=True)
-
-        for k, (gene, w) in enumerate(gene_weights_sorted):
-            # normalised weight: 1.0 = highest weight, 0.0 = lowest
+        for k, (gene, w) in enumerate(sorted(gene_weights, key=lambda x: x[1], reverse=True)):
             t      = (w - w_min) / w_range
             radius = R_min + (1.0 - t) * (R_max - R_min)
-            # evenly distribute angles 
             angle  = 2 * np.pi * k / n_tgt
             pos[gene] = np.array([radius * np.cos(angle), radius * np.sin(angle)])
 
@@ -228,7 +225,7 @@ class NetGrep:
         self._dirty = True
 
     def _exit_subgraph_mode(self):
-        """Return to the full PKL graph."""
+        """Restore the full PKL graph after viewing a regulon subgraph."""
         if not self._subgraph_mode or self._full_G_pkl is None:
             return
         self._subgraph_mode = False
@@ -245,7 +242,7 @@ class NetGrep:
         self._dirty = True
 
     def _layout_grn_clusters(self):
-        """Spiral layout — TFs on a circle, genes fanned outward."""
+        """Place TFs evenly on a circle, then fan their target genes outward."""
         G    = self.G
         tfs  = [n for n in G.nodes() if n in self.pkl_tfs]
         N_tf = len(tfs)
@@ -253,6 +250,7 @@ class NetGrep:
             rng = np.random.default_rng(42)
             return {n: rng.uniform(-1, 1, 2) for n in G.nodes()}
 
+        # Interleave high- and low-degree TFs so large clusters don't sit adjacent
         tfs_sorted = sorted(tfs, key=lambda t: G.out_degree(t), reverse=True)
         reordered, lo, hi, toggle = [], 0, len(tfs_sorted) - 1, True
         while lo <= hi:
@@ -260,18 +258,19 @@ class NetGrep:
             else:      reordered.append(tfs_sorted[hi]);  hi -= 1
             toggle = not toggle
 
-        # hub_separation slider (1–20) scales the ring radius
-        R_tf = max(3.0, N_tf * 0.75) * (self.hub_separation / 5.0)
+        max_targets = max((G.out_degree(tf) for tf in tfs), default=1)
+        R_tf = max(6.0, N_tf * 1.5, np.sqrt(max_targets) * 1.2) * (self.hub_separation / 5.0)
+
         tf_pos, tf_angle = {}, {}
         for k, tf in enumerate(reordered):
-            angle = 2 * np.pi * k / N_tf
+            angle        = 2 * np.pi * k / N_tf
             tf_pos[tf]   = np.array([R_tf * np.cos(angle), R_tf * np.sin(angle)])
             tf_angle[tf] = angle
 
         return self._place_genes(tf_pos, tf_angle, R_tf)
 
     def _layout_grn_overlap(self):
-        """GRN Cluster — TF positions driven by Jaccard MDS on target-set overlap."""
+        """Position TFs via MDS on pairwise Jaccard distance of their target sets."""
         G    = self.G
         tfs  = [n for n in G.nodes() if n in self.pkl_tfs]
         N_tf = len(tfs)
@@ -300,14 +299,14 @@ class NetGrep:
         lam    = np.maximum(eigvals[idx2], 0.0)
         coords = eigvecs[:, idx2] * np.sqrt(lam)[None, :]
 
-        # hub_separation slider (1–20) scales overall spread
-        R_tf   = max(3.0, N_tf * 0.75) * (self.hub_separation / 5.0)
+        max_targets = max((G.out_degree(tf) for tf in tfs), default=1)
+        R_tf   = max(6.0, N_tf * 1.5, np.sqrt(max_targets) * 1.2) * (self.hub_separation / 5.0)
         spread = np.std(coords) + 1e-8
         coords = coords / spread * R_tf * 0.85
 
-        # enforce minimum TF–TF distance
-        min_tf_dist = R_tf * 0.55
-        for _ in range(80):
+        # Push TF hubs apart until no two are closer than the minimum separation
+        min_tf_dist = R_tf * 0.9
+        for _ in range(200):
             moved = False
             for i in range(N_tf):
                 for j in range(i + 1, N_tf):
@@ -330,6 +329,12 @@ class NetGrep:
         return self._place_genes(tf_pos, tf_angle, R_tf)
 
     def _place_genes(self, tf_pos, tf_angle, R_tf):
+        """Fan target genes outward from their TF positions.
+
+        Genes shared by multiple TFs are placed at the centroid of those TFs.
+        Genes unique to one TF are arranged in an arc. Overlap removal is
+        applied as a final pass.
+        """
         G     = self.G
         tfs   = set(tf_pos.keys())
         genes = [n for n in G.nodes() if n not in self.pkl_tfs]
@@ -346,7 +351,7 @@ class NetGrep:
             centre    = np.mean([tf_pos[t] for t in tfl], axis=0)
             dist      = np.linalg.norm(centre)
             direction = centre / dist if dist > 1e-6 else np.array([1.0, 0.0])
-            pos[gene] = direction * (dist + R_tf * 0.18)
+            pos[gene] = direction * (dist + R_tf * 0.25)
 
         tf_unique = {tf: [] for tf in tfs}
         for gene, tf in unique_genes.items():
@@ -357,35 +362,34 @@ class NetGrep:
                 continue
             n_g      = len(gene_list)
             base_ang = tf_angle[tf]
-            arc      = min(np.pi * 0.85, 0.22 * np.sqrt(n_g))
-            r_min    = R_tf * 0.55
-            r_max    = R_tf * 1.1 + 0.10 * np.sqrt(n_g)
+            arc      = min(2 * np.pi * 0.85, 0.35 * np.sqrt(n_g) + 0.5)
+            r_min    = R_tf * 0.45 + 0.3 * np.sqrt(n_g)
+            r_max    = r_min + 0.5 * np.sqrt(n_g) + 1.0
 
             def edge_w(g, _tf=tf):
                 d = G.get_edge_data(_tf, g)
                 return float(d.get('w', 0)) if d else 0.0
-            gene_list_sorted = sorted(gene_list, key=edge_w, reverse=True)
 
-            for j, gene in enumerate(gene_list_sorted):
+            for j, gene in enumerate(sorted(gene_list, key=edge_w, reverse=True)):
                 a = base_ang if n_g == 1 else base_ang - arc/2 + arc * j / (n_g - 1)
                 r = r_min + (r_max - r_min) * (j / max(n_g - 1, 1))
-                r += rng.uniform(-r_min * 0.1, r_min * 0.1)
+                r += rng.uniform(-0.05, 0.05)
                 pos[gene] = tf_pos[tf] + np.array([r * np.cos(a), r * np.sin(a)])
 
         for k, gene in enumerate(orphan_genes):
             angle     = 2 * np.pi * k / max(len(orphan_genes), 1)
-            pos[gene] = np.array([np.cos(angle), np.sin(angle)]) * (R_tf * 1.6)
+            pos[gene] = np.array([np.cos(angle), np.sin(angle)]) * (R_tf * 2.0)
 
-        pos = self._remove_gene_overlap(pos, tfs, min_dist=R_tf * 0.12)
-        return pos
+        n_genes  = max(len(genes), 1)
+        min_dist = max(0.4, 1.2 / np.sqrt(n_genes / max(len(tfs), 1)))
+        return self._remove_gene_overlap(pos, tfs, min_dist=min_dist)
 
     def _remove_gene_overlap(self, pos, tf_set, min_dist=0.55, iterations=40):
-        """Push gene nodes apart. Capped at 5000 genes for performance."""
+        """Iteratively push gene nodes apart until no two are closer than min_dist.
+        Skipped for graphs with more than 5000 genes to avoid O(N²) stalls.
+        """
         genes = [n for n in pos if n not in tf_set]
-        if len(genes) < 2:
-            return pos
-        # avoid O(N²) stall on huge graphs (TESTING)
-        if len(genes) > 5000:
+        if len(genes) < 2 or len(genes) > 5000:
             return pos
 
         P = np.array([pos[g] for g in genes], dtype=float)
@@ -405,7 +409,9 @@ class NetGrep:
         return pos
 
     def _layout_forceatlas2(self, iterations=150, kr=0.05, kg=1.0, ks=0.1):
-        """FA2 mimic for CSV / undirected graphs only."""
+        """ForceAtlas2-style layout for undirected CSV graphs.
+        Falls back to centre-repulsion approximation for graphs > 2000 nodes.
+        """
         G     = self.G
         nodes = list(G.nodes())
         N     = len(nodes)
@@ -448,19 +454,44 @@ class NetGrep:
         return {n: P[i] for i, n in enumerate(nodes)}
 
     def _apply_cluster_spread(self):
-        """Re-run the current PKL layout with updated hub_separation, then refit."""
+        """Scale TF positions from the centroid and move gene clouds rigidly."""
         if not self._base_pos:
             return
         if not self.pkl_tfs or self.viz_source != "PKL":
             self.pos = dict(self._base_pos)
             self.center_to_fit()
             return
-        # recompute layout so spread is baked into positions, then refit
-        preset = dpg.get_value(self.layout_combo) if hasattr(self, 'layout_combo') else "GRN Cluster"
-        self._recompute_pkl_layout(preset)
+
+        s  = self.cluster_spread
+        G  = self.G
+        bp = self._base_pos
+
+        tf_base = {n: bp[n] for n in bp if n in self.pkl_tfs}
+        if not tf_base:
+            self.pos = dict(bp)
+            self.center_to_fit()
+            return
+
+        centroid = np.mean(list(tf_base.values()), axis=0)
+        new_tf   = {tf: centroid + (bp[tf] - centroid) * s for tf in tf_base}
+
+        new_pos = dict(new_tf)
+        for node in bp:
+            if node in self.pkl_tfs:
+                continue
+            preds = [p for p in G.predecessors(node) if p in self.pkl_tfs and p in bp]
+            if preds:
+                primary       = max(preds, key=lambda p: G.out_degree(p))
+                offset        = bp[node] - bp[primary]
+                new_pos[node] = new_tf[primary] + offset
+            else:
+                new_pos[node] = centroid + (bp[node] - centroid) * s
+
+        self.pos = new_pos
+        self.center_to_fit()
 
     def _recompute_pkl_layout(self, preset):
-        """Run PKL layout in background thread with a status indicator."""
+        """Run a PKL layout algorithm in a background thread and update the display."""
         if self._layout_running:
             return
         self._layout_running  = True
@@ -468,10 +499,8 @@ class NetGrep:
         self._start_layout_ui()
 
         def _worker():
-            if preset == "GRN Cluster":
-                raw = self._layout_grn_overlap()
-            else:
-                raw = self._layout_grn_clusters()
+            raw = self._layout_grn_overlap() if preset == "GRN Cluster" \
+                  else self._layout_grn_clusters()
             self._layout_progress = 1.0
             self._base_pos = {n: np.array(p, dtype=float) for n, p in raw.items()}
             self.pos = dict(self._base_pos)
@@ -488,12 +517,10 @@ class NetGrep:
         N  = G.number_of_nodes()
         Gu = G.to_undirected() if G.is_directed() else G
 
-        # PKL layouts always go through _recompute_pkl_layout (shows progress)
         if preset in ("GRN Cluster", "Spiral"):
             self._recompute_pkl_layout(preset)
             return
 
-        # CSV instant layouts
         instant = {"Circular", "Spectral", "Random"}
         if preset in instant:
             raw = self._run_instant_layout(preset, Gu, N)
@@ -504,7 +531,6 @@ class NetGrep:
             self._finish_layout_ui()
             return
 
-        # CSV slow layouts → background thread
         if self._layout_running:
             return
         self._layout_running  = True
@@ -555,49 +581,8 @@ class NetGrep:
             dpg.configure_item(self.layout_progress_bar, show=False, default_value=0.0)
             dpg.configure_item(self.layout_apply_btn, enabled=True)
 
-    def _apply_cluster_spread(self):
-        """
-        Post-layout spread: scale TF positions from centroid by cluster_spread,
-        move gene clouds rigidly. Then refit view.
-        """
-        if not self._base_pos:
-            return
-        if not self.pkl_tfs or self.viz_source != "PKL":
-            self.pos = dict(self._base_pos)
-            self.center_to_fit()
-            return
-
-        s  = self.cluster_spread
-        G  = self.G
-        bp = self._base_pos
-
-        tf_base = {n: bp[n] for n in bp if n in self.pkl_tfs}
-        if not tf_base:
-            self.pos = dict(bp)
-            self.center_to_fit()
-            return
-
-        centroid = np.mean(list(tf_base.values()), axis=0)
-        new_tf   = {tf: centroid + (bp[tf] - centroid) * s for tf in tf_base}
-
-        new_pos = dict(new_tf)
-        for node in bp:
-            if node in self.pkl_tfs:
-                continue
-            preds = [p for p in G.predecessors(node) if p in self.pkl_tfs and p in bp]
-            if preds:
-                primary       = max(preds, key=lambda p: G.out_degree(p))
-                offset        = bp[node] - bp[primary]
-                new_pos[node] = new_tf[primary] + offset
-            else:
-                # scale stray nodes 
-                new_pos[node] = centroid + (bp[node] - centroid) * s
-
-        self.pos = new_pos
-        self.center_to_fit()
-
     def render_frame(self):
-        # update progress bar from main thread 
+        # Sync progress bar from the layout worker thread (DPG is not thread-safe)
         if self._layout_running and hasattr(self, 'layout_progress_bar'):
             dpg.set_value(self.layout_progress_bar, self._layout_progress)
         elif not self._layout_running and hasattr(self, 'layout_progress_bar'):
@@ -633,23 +618,18 @@ class NetGrep:
         et           = self.edge_thickness
         active_nodes = set()
 
-        n_edges   = self.G.number_of_edges()
-        n_nodes   = self.G.number_of_nodes()
-
-        # LOD thresholds (TESTING)
-        EDGE_LOD_SKIP  = 15_000   
-        NODE_LABEL_LOD = 500      
-        large_graph    = n_edges > EDGE_LOD_SKIP
+        n_edges     = self.G.number_of_edges()
+        n_nodes     = self.G.number_of_nodes()
+        large_graph = n_edges > 15_000
 
         sng_active = getattr(self, '_subnetgrep_active', False)
         sng_roles  = getattr(self, '_subnetgrep_roles', {})
 
-        # role → fill colour
         SNG_COLORS = {
-            "gene":        [50,  200,  80, 255],   # green
-            "direct_tf":   [220,  60,  60, 255],   # red
-            "adjacent":    [60,  130, 220, 255],   # blue
-            "indirect_tf": [160,  80, 200, 255],   # purple
+            "gene":        [50,  200,  80, 255],
+            "direct_tf":   [220,  60,  60, 255],
+            "adjacent":    [60,  130, 220, 255],
+            "indirect_tf": [160,  80, 200, 255],
         }
 
         for u, v, d in self.G.edges(data=True):
@@ -659,39 +639,31 @@ class NetGrep:
             j = node_idx.get(v)
             if i is None or j is None:
                 continue
-
-            
             if not (vis[i] and vis[j]):
                 continue
 
             is_hl_edge = hl_tf and ((u == hl_tf and v in hl_tgt) or
                                      (v == hl_tf and u in hl_tgt))
 
-            # LOD: on large graphs skip non-highlighted edges entirely (TESTING)
+            # On very large graphs skip drawing non-highlighted edges for performance
             if large_graph and not is_hl_edge:
-                active_nodes.add(u)
-                active_nodes.add(v)
+                active_nodes.add(u); active_nodes.add(v)
                 continue
 
-            active_nodes.add(u)
-            active_nodes.add(v)
+            active_nodes.add(u); active_nodes.add(v)
 
-            if is_hl_edge:
-                clr = self.clr_hl_edge
-                th  = et * 2.5
-            else:
-                clr = self.clr_edge
-                th  = et
+            clr = self.clr_hl_edge if is_hl_edge else self.clr_edge
+            th  = et * 2.5         if is_hl_edge else et
 
             p1 = [float(Sx[i]), float(Sy[i])]
-            p2 = [float(Sx[j]), float(Sy[j])]   
+            p2 = [float(Sx[j]), float(Sy[j])]
 
             undirected_edge = d.get('undirected', False)
             if sng_active or (is_pkl and not undirected_edge):
                 dx, dy = p2[0]-p1[0], p2[1]-p1[1]
-                ln = max((dx**2+dy**2)**0.5, 1e-6)
+                ln     = max((dx**2+dy**2)**0.5, 1e-6)
                 shrink = self.node_scale + 4
-                p2s = [p2[0] - dx/ln*shrink, p2[1] - dy/ln*shrink]
+                p2s    = [p2[0] - dx/ln*shrink, p2[1] - dy/ln*shrink]
                 if undirected_edge:
                     dpg.draw_line(p1=p1, p2=p2s, color=clr,
                                   thickness=th, parent="graph_layer")
@@ -714,20 +686,16 @@ class NetGrep:
                 node_r = r * 2.2 if role in ("gene", "direct_tf") else r
             elif is_pkl:
                 if node == hl_tf:
-                    fill   = self.clr_hl_tf
-                    node_r = r * 2.2          # highlighted TF: larger
+                    fill = self.clr_hl_tf; node_r = r * 2.2
                     dpg.draw_circle(center=[cx, cy], radius=node_r + 5,
                                     color=[*self.clr_hl_tf[:3], 50], thickness=2,
                                     parent="graph_layer")
                 elif node in pkl_tfs:
-                    fill   = self.clr_hl_tf
-                    node_r = r * 2.2          # TF hubs always larger
+                    fill = self.clr_hl_tf; node_r = r * 2.2
                 elif node in hl_tgt:
-                    fill   = self.clr_hl_edge
-                    node_r = r
+                    fill = self.clr_hl_edge; node_r = r
                 else:
-                    fill   = self.clr_hl_tgt
-                    node_r = r
+                    fill = self.clr_hl_tgt; node_r = r
             else:
                 node_r = r
                 if node == hl_tf:
@@ -744,7 +712,7 @@ class NetGrep:
                             color=[0, 0, 0, 0], parent="graph_layer")
 
             show_label = (sng_active or node == hl_tf or node in hl_tgt or
-                          (is_pkl and node in pkl_tfs and n_nodes < NODE_LABEL_LOD))
+                          (is_pkl and node in pkl_tfs and n_nodes < 500))
             if show_label:
                 dpg.draw_text(pos=[cx + node_r + 3, cy - 6], text=str(node),
                               size=12, color=[225, 225, 225, 220],
@@ -765,14 +733,390 @@ class NetGrep:
     def _on_prevent_overlap_toggle(self, sender, app_data):
         self.prevent_overlap = app_data
         if app_data:
-            # apply spread to current positions without full recompute
             self._spread_overlaps_fast()
             self._reset_view()
             self._dirty = True
         else:
-            # recompute layout without spread
             preset = dpg.get_value(self.layout_combo) if hasattr(self, 'layout_combo') else "ForceAtlas2"
             self._compute_layout(preset)
+
+    def _on_scale_slider(self, val):
+        self.user_scale = float(val)
+        self._apply_user_scale()
+
+    def _filter_regulons(self, sender, app_data):
+        q = app_data.lower()
+        filtered = [n for n in self.regulons_json if q in n.lower()]
+        dpg.configure_item(self.regulon_listbox, items=filtered)
+
+    def _layout_radial_tf(self):
+        G = self.G
+        if not self.pkl_tfs or self.viz_source != "PKL":
+            return None
+        tfs   = [n for n in G.nodes() if n in self.pkl_tfs]
+        genes = [n for n in G.nodes() if n not in self.pkl_tfs]
+        N_tf  = len(tfs)
+        pos   = {}
+        for i, tf in enumerate(tfs):
+            angle   = 2 * np.pi * i / max(N_tf, 1)
+            pos[tf] = np.array([np.cos(angle), np.sin(angle)]) * 1.0
+        rng = np.random.default_rng(42)
+        for gene in genes:
+            preds = [p for p in G.predecessors(gene) if p in pos]
+            if preds:
+                centre    = np.mean([pos[p] for p in preds], axis=0)
+                pos[gene] = centre * 0.55 + rng.uniform(-0.12, 0.12, 2)
+            else:
+                pos[gene] = rng.uniform(-0.4, 0.4, 2)
+        return pos
+
+    def _layout_hierarchical(self):
+        G  = self.G
+        Gu = G.to_undirected() if G.is_directed() else G
+        try:
+            layers = {}
+            Gd = G if G.is_directed() else G.to_directed()
+            for n in nx.topological_sort(Gd):
+                preds    = list(Gd.predecessors(n))
+                layers[n] = (max(layers[p] for p in preds) + 1) if preds else 0
+        except nx.NetworkXUnfeasible:
+            root   = max(G.nodes(), key=lambda n: G.degree(n))
+            layers = nx.single_source_shortest_path_length(Gu, root)
+        max_layer = max(layers.values()) if layers else 1
+        by_layer  = {}
+        for n, l in layers.items():
+            by_layer.setdefault(l, []).append(n)
+        rng = np.random.default_rng(42)
+        pos = {}
+        for l, nds in by_layer.items():
+            y = l / max(max_layer, 1)
+            for j, n in enumerate(nds):
+                x      = (j + 0.5) / len(nds)
+                pos[n] = np.array([x + rng.uniform(-0.02, 0.02), y])
+        return pos
+
+    def _spread_overlaps_fast(self, iterations=25):
+        if len(self.pos) < 2:
+            return
+        nodes = list(self.pos.keys())
+        P     = np.array([self.pos[n] for n in nodes], dtype=float)
+        deg   = np.array([self.G.degree(n) + 1 for n in nodes], dtype=float)
+        sep   = 0.04 * (deg ** 0.4)
+        for _ in range(iterations):
+            diff  = P[:, None, :] - P[None, :, :]
+            dist  = np.sqrt((diff ** 2).sum(axis=2) + 1e-12)
+            np.fill_diagonal(dist, np.inf)
+            min_d = sep[:, None] + sep[None, :]
+            close = dist < min_d
+            if not close.any():
+                break
+            overlap = np.where(close, (min_d - dist) / 2, 0.0)
+            unit    = diff / dist[:, :, None]
+            P      += (overlap[:, :, None] * unit).sum(axis=1)
+        for i, n in enumerate(nodes):
+            self.pos[n] = P[i]
+
+    def _reset_view(self):
+        """Fit the current layout to canvas."""
+        self.user_scale = 1.0
+        if not self.pos:
+            self.view_scale = 300.0
+            self.view_ox    = CANVAS_W / 2
+            self.view_oy    = CANVAS_H / 2
+            return
+        pts  = np.array(list(self.pos.values()))
+        mn, mx = pts.min(axis=0), pts.max(axis=0)
+        span = np.where((mx - mn) < 1e-6, 1.0, mx - mn)
+        self._base_scale = float(min(CANVAS_W * 0.88 / span[0],
+                                     CANVAS_H * 0.88 / span[1]))
+        mid          = (mn + mx) / 2
+        self._base_ox = CANVAS_W / 2 - mid[0] * self._base_scale
+        self._base_oy = CANVAS_H / 2 - mid[1] * self._base_scale
+        self._apply_user_scale()
+
+    def _apply_user_scale(self):
+        s            = self._base_scale * self.user_scale
+        mid_screen_x = CANVAS_W / 2
+        mid_screen_y = CANVAS_H / 2
+        gx           = (mid_screen_x - self._base_ox) / self._base_scale
+        gy           = (mid_screen_y - self._base_oy) / self._base_scale
+        self.view_scale = s
+        self.view_ox    = mid_screen_x - gx * s
+        self.view_oy    = mid_screen_y - gy * s
+        self._dirty     = True
+
+    def _switch_source(self, source):
+        self.viz_source = source
+        self.G          = self.G_csv if source == "CSV" else self.G_pkl
+        self.degrees    = dict(self.G.degree())
+        self._update_layout_combo()
+        preset = dpg.get_value(self.layout_combo) if hasattr(self, 'layout_combo') else "ForceAtlas2"
+        self._compute_layout(preset)
+        self._rebuild_weights()
+        self._update_histogram_ui()
+
+    def _update_layout_combo(self):
+        if not hasattr(self, 'layout_combo'):
+            return
+        if self.viz_source == "PKL":
+            items, default = ["GRN Cluster", "Spiral"], "GRN Cluster"
+        else:
+            items, default = ["ForceAtlas2", "Spring", "Spectral", "Circular", "Random"], "ForceAtlas2"
+        dpg.configure_item(self.layout_combo, items=items)
+        dpg.set_value(self.layout_combo, default)
+
+    def apply_layout(self):
+        self._compute_layout(dpg.get_value(self.layout_combo))
+
+    def center_to_fit(self):
+        """Zoom/pan to fit current self.pos without modifying layout."""
+        if not self.pos:
+            return
+        pts  = np.array(list(self.pos.values()))
+        mn, mx = pts.min(axis=0), pts.max(axis=0)
+        span = np.where((mx - mn) < 1e-6, 1.0, mx - mn)
+        fit_scale    = float(min(CANVAS_W * 0.88 / span[0], CANVAS_H * 0.88 / span[1]))
+        mid          = (mn + mx) / 2
+        self.view_scale = fit_scale
+        self.view_ox    = CANVAS_W / 2 - mid[0] * fit_scale
+        self.view_oy    = CANVAS_H / 2 - mid[1] * fit_scale
+        self._dirty     = True
+
+    def _apply_max_edges(self, val):
+        self.max_edges = int(val) if val > 0 else 999_999_999
+        if self.regulons_json:
+            self.G_pkl = self._build_graph_from_json()
+            if self.viz_source == "PKL":
+                self.G = self.G_pkl
+                self.degrees = dict(self.G.degree())
+                self._compute_layout(dpg.get_value(self.layout_combo))
+                self._rebuild_weights()
+                self._update_histogram_ui()
+                n, e = self.G_pkl.number_of_nodes(), self.G_pkl.number_of_edges()
+                dpg.set_value(self.regulon_status,
+                              f"{len(self.regulons_json)} regulons  |  {n}n  {e}e")
+
+    def _update_histogram_ui(self):
+        if not hasattr(self, 'hist_bars_tag'):
+            return
+        wmax = float(max(self.weights)) if self.weights else 1.0
+        dpg.set_value(self.hist_bars_tag,
+                      [self.bin_centers.tolist(), self.hist_data.tolist()])
+        dpg.set_axis_limits("hist_x", 0.0, wmax)
+        dpg.set_axis_limits("hist_y", 0.0, float(self.hist_data.max()) * 1.15 + 1)
+        dpg.configure_item("weight_slider", max_value=wmax, default_value=0.0)
+        self.min_weight = 0.0
+        self._dirty = True
+
+    @staticmethod
+    def _to_rgba(v):
+        if isinstance(v, (list, tuple)) and len(v) >= 3:
+            if all(isinstance(x, float) and x <= 1.0 for x in v):
+                return [int(x * 255) for x in v]
+        return list(v)
+
+    def _clr_cb(self, attr):
+        def cb(s, a):
+            setattr(self, attr, self._to_rgba(a))
+            self._dirty = True
+        return cb
+
+    def on_csv_selected(self, sender, app_data):
+        path = app_data.get('file_path_name', '')
+        if not path:
+            return
+        self.G_csv = self._load_csv(path)
+        if self.viz_source == "CSV":
+            self.G = self.G_csv
+            self.degrees = dict(self.G.degree())
+            self._compute_layout(dpg.get_value(self.layout_combo))
+            self._rebuild_weights()
+            self._update_histogram_ui()
+
+    def on_pkl_selected(self, sender, app_data):
+        path = app_data.get('file_path_name', '')
+        if not path:
+            return
+        self.regulons      = {}
+        self.regulons_json = {}
+        self.load_pkl(path)
+        self.convert_pkl_to_json()
+        self.G_pkl = self._build_graph_from_json()
+        names = list(self.regulons_json.keys())
+        dpg.configure_item(self.regulon_listbox, items=names)
+        n, e = self.G_pkl.number_of_nodes(), self.G_pkl.number_of_edges()
+        dpg.set_value(self.regulon_status, f"{len(names)} regulons  |  {n}n  {e}e")
+        if self.viz_source == "PKL":
+            self.G = self.G_pkl
+            self.degrees = dict(self.G.degree())
+            self._compute_layout(dpg.get_value(self.layout_combo))
+            self._rebuild_weights()
+            self._update_histogram_ui()
+
+    def select_regulon(self, sender, app_data):
+        name = dpg.get_value(self.regulon_listbox)
+        if not name or name not in self.regulons_json:
+            self._clear_regulon(); return
+        if name == self.highlighted_tf:
+            self._clear_regulon(); return
+        self.highlighted_tf      = name
+        self.highlighted_targets = set(self.regulons_json[name]["targets"])
+        self._dirty = True
+
+    def _clear_regulon(self):
+        self.highlighted_tf      = None
+        self.highlighted_targets = set()
+        if hasattr(self, 'regulon_listbox'):
+            dpg.set_value(self.regulon_listbox, "")
+        self._dirty = True
+
+    def _draw_arrow(self, p1, p2, color, thickness):
+        dpg.draw_line(p1=p1, p2=p2, color=color, thickness=thickness,
+                      parent="graph_layer")
+        dx, dy = p2[0]-p1[0], p2[1]-p1[1]
+        length = max((dx**2+dy**2)**0.5, 1e-6)
+        ux, uy = dx/length, dy/length
+        arr    = 8.0 * thickness**0.5
+        ax_    = p2[0] - ux*arr;  ay_ = p2[1] - uy*arr
+        px, py = -uy*arr*0.4,     ux*arr*0.4
+        dpg.draw_triangle(p1=p2,
+                          p2=[ax_+px, ay_+py],
+                          p3=[ax_-px, ay_-py],
+                          color=color, fill=color, parent="graph_layer")
+
+    def _export_regulon_targets(self):
+        """Export the current regulon's targets and weights to a CSV file."""
+        name = self.highlighted_tf
+        if not name or name not in self.regulons_json:
+            return
+        safe_name = name.replace('/', '_').replace('\\', '_')
+        dpg.configure_item("export_dialog", default_filename=f"{safe_name}_targets")
+        dpg.show_item("export_dialog")
+
+    def _on_export_selected(self, sender, app_data):
+        path = app_data.get('file_path_name', '')
+        if not path:
+            return
+        if not path.lower().endswith('.csv'):
+            path += '.csv'
+        name = self.highlighted_tf
+        if not name or name not in self.regulons_json:
+            return
+        gene_weights = self.regulons_json[name]["gene_weights"]
+        try:
+            with open(path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["gene", "weight"])
+                for gene, weight in sorted(gene_weights.items(),
+                                           key=lambda x: x[1], reverse=True):
+                    writer.writerow([gene, weight])
+            print(f"[export] {len(gene_weights)} targets written to {path}")
+        except Exception as e:
+            print(f"[export error] {e}")
+
+    # SubNetGrep
+
+    def _run_subnetgrep(self):
+        gene = dpg.get_value(self._subnetgrep_input).strip()
+        if not gene or not self.regulons_json:
+            return
+        self._subnetgrep_gene = gene
+
+        direct_tfs = {tf for tf, data in self.regulons_json.items()
+                      if gene in data["gene_weights"]}
+
+        csv_neighbours = set(self.G_csv.neighbors(gene)) if gene in self.G_csv else set()
+        blue_nodes = set()
+        for nb in csv_neighbours:
+            nb_tfs = {tf for tf, data in self.regulons_json.items()
+                      if nb in data["gene_weights"]}
+            if nb_tfs & direct_tfs:
+                blue_nodes.add(nb)
+
+        indirect_tfs = set()
+        for nb in blue_nodes:
+            for tf, data in self.regulons_json.items():
+                if nb in data["gene_weights"] and tf not in direct_tfs:
+                    indirect_tfs.add(tf)
+
+        sub = nx.DiGraph()
+        sub.add_node(gene,       role="gene")
+        for tf in direct_tfs:   sub.add_node(tf, role="direct_tf")
+        for nb in blue_nodes:   sub.add_node(nb, role="adjacent")
+        for tf in indirect_tfs: sub.add_node(tf, role="indirect_tf")
+
+        for tf in direct_tfs:
+            w = self.regulons_json[tf]["gene_weights"].get(gene, 0.0)
+            sub.add_edge(tf, gene, w=w)
+
+        for nb in blue_nodes:
+            d = self.G_csv.get_edge_data(gene, nb) or {}
+            w = float(d.get('w', d.get('weight', 1.0)))
+            sub.add_edge(gene, nb, w=w, undirected=True)
+            sub.add_edge(nb, gene, w=w, undirected=True)
+
+        for tf in direct_tfs:
+            for nb in blue_nodes:
+                if nb in self.regulons_json.get(tf, {}).get("gene_weights", {}):
+                    sub.add_edge(tf, nb, w=self.regulons_json[tf]["gene_weights"][nb])
+
+        for tf in indirect_tfs:
+            for nb in blue_nodes:
+                if nb in self.regulons_json.get(tf, {}).get("gene_weights", {}):
+                    sub.add_edge(tf, nb, w=self.regulons_json[tf]["gene_weights"][nb])
+
+        pos = self._layout_subnetgrep(gene, direct_tfs, blue_nodes, indirect_tfs, sub)
+
+        self._subnetgrep_graph  = sub
+        self._subnetgrep_pos    = pos
+        self._subnetgrep_roles  = {
+            gene: "gene",
+            **{tf: "direct_tf"   for tf in direct_tfs},
+            **{nb: "adjacent"    for nb in blue_nodes},
+            **{tf: "indirect_tf" for tf in indirect_tfs},
+        }
+        self._subnetgrep_active  = True
+        self._pre_subnetgrep_G   = self.G
+        self._pre_subnetgrep_pos = dict(self.pos)
+        self.G         = sub
+        self.pos       = pos
+        self._base_pos = dict(pos)
+        self._reset_view()
+        self._dirty = True
+        dpg.configure_item(self._subnetgrep_run_btn,  show=False)
+        dpg.configure_item(self._subnetgrep_exit_btn, show=True)
+
+    def _layout_subnetgrep(self, gene, direct_tfs, blue_nodes, indirect_tfs, sub):
+        """Concentric ring layout centred on the gene of interest."""
+        pos = {gene: np.array([0.0, 0.0])}
+
+        def _ring(nodes, radius):
+            nodes = sorted(nodes)
+            n = max(len(nodes), 1)
+            return {nd: np.array([radius * np.cos(2*np.pi*k/n),
+                                  radius * np.sin(2*np.pi*k/n)])
+                    for k, nd in enumerate(nodes)}
+
+        R1 = max(1.5, len(direct_tfs)   * 0.35)
+        R2 = R1 + max(1.5, len(blue_nodes)   * 0.25)
+        R3 = R2 + max(1.5, len(indirect_tfs) * 0.25)
+
+        pos.update(_ring(direct_tfs,   R1))
+        pos.update(_ring(blue_nodes,   R2))
+        pos.update(_ring(indirect_tfs, R3))
+        return pos
+
+    def _exit_subnetgrep(self):
+        if not getattr(self, '_subnetgrep_active', False):
+            return
+        self._subnetgrep_active = False
+        self.G         = self._pre_subnetgrep_G
+        self.pos       = self._pre_subnetgrep_pos
+        self._base_pos = dict(self.pos)
+        self._reset_view()
+        self._dirty = True
+        dpg.configure_item(self._subnetgrep_run_btn,  show=True)
+        dpg.configure_item(self._subnetgrep_exit_btn, show=False)
 
     def init_gui(self):
         dpg.create_context()
@@ -812,6 +1156,12 @@ class NetGrep:
                              callback=self._on_export_selected, width=640, height=440,
                              default_filename="regulon_targets.csv"):
             dpg.add_file_extension(".csv", color=[100, 220, 100, 255])
+        with dpg.file_dialog(tag="export_vector_dialog", directory_selector=False,
+                             show=False, callback=self._on_export_vector_selected,
+                             width=640, height=440,
+                             default_filename="network_export.pdf"):
+            dpg.add_file_extension(".pdf", color=[255, 180, 100, 255])
+            dpg.add_file_extension(".svg", color=[100, 200, 255, 255])
 
         with dpg.window(tag="main_win", no_scrollbar=True, no_move=True,
                         no_resize=True, no_title_bar=True):
@@ -994,6 +1344,15 @@ class NetGrep:
                             callback=self._exit_subnetgrep, show=False)
                         dpg.add_spacer(height=4)
 
+                    with dpg.collapsing_header(label="  EXPORT", default_open=False):
+                        dpg.add_spacer(height=2)
+                        dpg.add_text("Export current view as vector graphic",
+                                     color=[140, 145, 155])
+                        dpg.add_spacer(height=3)
+                        dpg.add_button(label="Export as PDF / SVG", width=-1,
+                                       callback=self._export_vector)
+                        dpg.add_spacer(height=4)
+
                 with dpg.child_window(tag="canvas_window", width=-1, height=-1,
                                       border=False, no_scrollbar=True):
                     with dpg.drawlist(width=CANVAS_W, height=CANVAS_H, tag="canvas"):
@@ -1011,423 +1370,166 @@ class NetGrep:
 
         dpg.destroy_context()
 
-    def _on_scale_slider(self, val):
-        self.user_scale = float(val)
-        self._apply_user_scale()
-
-    def _filter_regulons(self, sender, app_data):
-        q = app_data.lower()
-        filtered = [n for n in self.regulons_json if q in n.lower()]
-        dpg.configure_item(self.regulon_listbox, items=filtered)
-
-    def _layout_radial_tf(self):
-        G = self.G
-        if not self.pkl_tfs or self.viz_source != "PKL":
-            return None
-        tfs   = [n for n in G.nodes() if n in self.pkl_tfs]
-        genes = [n for n in G.nodes() if n not in self.pkl_tfs]
-        N_tf  = len(tfs)
-        pos   = {}
-        for i, tf in enumerate(tfs):
-            angle = 2 * np.pi * i / max(N_tf, 1)
-            pos[tf] = np.array([np.cos(angle), np.sin(angle)]) * 1.0
-        rng = np.random.default_rng(42)
-        for gene in genes:
-            preds = [p for p in G.predecessors(gene) if p in pos]
-            if preds:
-                centre = np.mean([pos[p] for p in preds], axis=0)
-                pos[gene] = centre * 0.55 + rng.uniform(-0.12, 0.12, 2)
-            else:
-                pos[gene] = rng.uniform(-0.4, 0.4, 2)
-        return pos
-
-    def _layout_hierarchical(self):
-        G  = self.G
-        Gu = G.to_undirected() if G.is_directed() else G
-        try:
-            layers = {}
-            Gd = G if G.is_directed() else G.to_directed()
-            for n in nx.topological_sort(Gd):
-                preds = list(Gd.predecessors(n))
-                layers[n] = (max(layers[p] for p in preds) + 1) if preds else 0
-        except nx.NetworkXUnfeasible:
-            root = max(G.nodes(), key=lambda n: G.degree(n))
-            layers = nx.single_source_shortest_path_length(Gu, root)
-        max_layer = max(layers.values()) if layers else 1
-        by_layer  = {}
-        for n, l in layers.items():
-            by_layer.setdefault(l, []).append(n)
-        rng = np.random.default_rng(42)
-        pos = {}
-        for l, nds in by_layer.items():
-            y = l / max(max_layer, 1)
-            for j, n in enumerate(nds):
-                x = (j + 0.5) / len(nds)
-                pos[n] = np.array([x + rng.uniform(-0.02, 0.02), y])
-        return pos
-
-    def _spread_overlaps_fast(self, iterations=25):
-        if len(self.pos) < 2:
-            return
-        nodes = list(self.pos.keys())
-        P     = np.array([self.pos[n] for n in nodes], dtype=float)
-        deg   = np.array([self.G.degree(n) + 1 for n in nodes], dtype=float)
-        sep   = 0.04 * (deg ** 0.4)
-        for _ in range(iterations):
-            diff  = P[:, None, :] - P[None, :, :]
-            dist  = np.sqrt((diff ** 2).sum(axis=2) + 1e-12)
-            np.fill_diagonal(dist, np.inf)
-            min_d = sep[:, None] + sep[None, :]
-            close = dist < min_d
-            if not close.any():
-                break
-            overlap = np.where(close, (min_d - dist) / 2, 0.0)
-            unit    = diff / dist[:, :, None]
-            P      += (overlap[:, :, None] * unit).sum(axis=1)
-        for i, n in enumerate(nodes):
-            self.pos[n] = P[i]
-
-    def _reset_view(self):
-        """Fit the current layout to canvas. Called once after layout completes."""
-        self.user_scale = 1.0
-        if not self.pos:
-            self.view_scale = 300.0
-            self.view_ox = CANVAS_W / 2
-            self.view_oy = CANVAS_H / 2
-            return
-        pts = np.array(list(self.pos.values()))
-        mn, mx = pts.min(axis=0), pts.max(axis=0)
-        span = np.where((mx - mn) < 1e-6, 1.0, mx - mn)
-        self._base_scale = float(min(CANVAS_W * 0.88 / span[0],
-                                     CANVAS_H * 0.88 / span[1]))
-        mid = (mn + mx) / 2
-        self._base_ox = CANVAS_W / 2 - mid[0] * self._base_scale
-        self._base_oy = CANVAS_H / 2 - mid[1] * self._base_scale
-        self._apply_user_scale()
-
-    def _apply_user_scale(self):
-        s = self._base_scale * self.user_scale
-        mid_screen_x = CANVAS_W / 2
-        mid_screen_y = CANVAS_H / 2
-        gx = (mid_screen_x - self._base_ox) / self._base_scale
-        gy = (mid_screen_y - self._base_oy) / self._base_scale
-        self.view_scale = s
-        self.view_ox = mid_screen_x - gx * s
-        self.view_oy = mid_screen_y - gy * s
-        self._dirty = True
-
-    def _switch_source(self, source):
-        self.viz_source = source
-        self.G       = self.G_csv if source == "CSV" else self.G_pkl
-        self.degrees = dict(self.G.degree())
-        # update layout combo items based on source
-        self._update_layout_combo()
-        preset = dpg.get_value(self.layout_combo) if hasattr(self, 'layout_combo') else "ForceAtlas2"
-        self._compute_layout(preset)
-        self._rebuild_weights()
-        self._update_histogram_ui()
-
-    def _update_layout_combo(self):
-        if not hasattr(self, 'layout_combo'):
-            return
-        if self.viz_source == "PKL":
-            items   = ["GRN Cluster", "Spiral"]
-            default = "GRN Cluster"
+    def _export_vector(self):
+        """Open a save dialog to export the active network as PDF or SVG."""
+        sng   = getattr(self, '_subnetgrep_active', False)
+        is_pkl = self.viz_source == "PKL"
+        if sng:
+            stem = f"{self._subnetgrep_gene}_subnetgrep"
+        elif is_pkl and self.highlighted_tf:
+            stem = f"{self.highlighted_tf.replace('/', '_')}_network"
         else:
-            items   = ["ForceAtlas2", "Spring", "Spectral", "Circular", "Random"]
-            default = "ForceAtlas2"
-        dpg.configure_item(self.layout_combo, items=items)
-        dpg.set_value(self.layout_combo, default)
+            stem = "network_export"
+        dpg.configure_item("export_vector_dialog",
+                           default_filename=f"{stem}.pdf")
+        dpg.show_item("export_vector_dialog")
 
-    def apply_layout(self):
-        self._compute_layout(dpg.get_value(self.layout_combo))
-
-    def center_to_fit(self):
-        """Zoom/pan to fit current self.pos without modifying layout."""
-        if not self.pos:
-            return
-        pts  = np.array(list(self.pos.values()))
-        mn, mx = pts.min(axis=0), pts.max(axis=0)
-        span = np.where((mx - mn) < 1e-6, 1.0, mx - mn)
-        fit_scale = float(min(CANVAS_W * 0.88 / span[0],
-                              CANVAS_H * 0.88 / span[1]))
-        mid = (mn + mx) / 2
-        self.view_scale = fit_scale
-        self.view_ox    = CANVAS_W / 2 - mid[0] * fit_scale
-        self.view_oy    = CANVAS_H / 2 - mid[1] * fit_scale
-        self._dirty     = True
-
-    def _apply_max_edges(self, val):
-        self.max_edges = int(val) if val > 0 else 999_999_999
-        if self.regulons_json:
-            self.G_pkl = self._build_graph_from_json()
-            if self.viz_source == "PKL":
-                self.G = self.G_pkl
-                self.degrees = dict(self.G.degree())
-                self._compute_layout(dpg.get_value(self.layout_combo))
-                self._rebuild_weights()
-                self._update_histogram_ui()
-                n, e = self.G_pkl.number_of_nodes(), self.G_pkl.number_of_edges()
-                dpg.set_value(self.regulon_status,
-                              f"{len(self.regulons_json)} regulons  |  {n}n  {e}e")
-
-    def _update_histogram_ui(self):
-        if not hasattr(self, 'hist_bars_tag'):
-            return
-        wmax = float(max(self.weights)) if self.weights else 1.0
-        dpg.set_value(self.hist_bars_tag,
-                      [self.bin_centers.tolist(), self.hist_data.tolist()])
-        dpg.set_axis_limits("hist_x", 0.0, wmax)
-        dpg.set_axis_limits("hist_y", 0.0, float(self.hist_data.max()) * 1.15 + 1)
-        dpg.configure_item("weight_slider", max_value=wmax, default_value=0.0)
-        self.min_weight = 0.0
-        self._dirty = True
-
-    @staticmethod
-    def _to_rgba(v):
-        if isinstance(v, (list, tuple)) and len(v) >= 3:
-            if all(isinstance(x, float) and x <= 1.0 for x in v):
-                return [int(x * 255) for x in v]
-        return list(v)
-
-    def _clr_cb(self, attr):
-        def cb(s, a):
-            setattr(self, attr, self._to_rgba(a))
-            self._dirty = True
-        return cb
-
-    def on_csv_selected(self, sender, app_data):
+    def _on_export_vector_selected(self, sender, app_data):
         path = app_data.get('file_path_name', '')
         if not path:
             return
-        self.G_csv = self._load_csv(path)
-        if self.viz_source == "CSV":
-            self.G = self.G_csv
-            self.degrees = dict(self.G.degree())
-            self._compute_layout(dpg.get_value(self.layout_combo))
-            self._rebuild_weights()
-            self._update_histogram_ui()
-
-    def on_pkl_selected(self, sender, app_data):
-        path = app_data.get('file_path_name', '')
-        if not path:
-            return
-        self.regulons = {}
-        self.regulons_json = {}
-        self.load_pkl(path)
-        self.convert_pkl_to_json()
-        self.G_pkl = self._build_graph_from_json()
-        names = list(self.regulons_json.keys())
-        dpg.configure_item(self.regulon_listbox, items=names)
-        n, e = self.G_pkl.number_of_nodes(), self.G_pkl.number_of_edges()
-        dpg.set_value(self.regulon_status, f"{len(names)} regulons  |  {n}n  {e}e")
-        if self.viz_source == "PKL":
-            self.G = self.G_pkl
-            self.degrees = dict(self.G.degree())
-            self._compute_layout(dpg.get_value(self.layout_combo))
-            self._rebuild_weights()
-            self._update_histogram_ui()
-
-    def select_regulon(self, sender, app_data):
-        name = dpg.get_value(self.regulon_listbox)
-        if not name or name not in self.regulons_json:
-            self._clear_regulon()
-            return
-        # toggle off if already selected
-        if name == self.highlighted_tf:
-            self._clear_regulon()
-            return
-        self.highlighted_tf      = name
-        self.highlighted_targets = set(self.regulons_json[name]["targets"])
-        self._dirty = True
-
-    def _clear_regulon(self):
-        self.highlighted_tf      = None
-        self.highlighted_targets = set()
-        if hasattr(self, 'regulon_listbox'):
-            dpg.set_value(self.regulon_listbox, "")
-        self._dirty = True
-
-    def _draw_arrow(self, p1, p2, color, thickness):
-        dpg.draw_line(p1=p1, p2=p2, color=color, thickness=thickness,
-                      parent="graph_layer")
-        dx = p2[0] - p1[0]
-        dy = p2[1] - p1[1]
-        length = max((dx**2 + dy**2)**0.5, 1e-6)
-        ux, uy = dx / length, dy / length
-        arr = 8.0 * thickness ** 0.5
-        ax = p2[0] - ux * arr
-        ay = p2[1] - uy * arr
-        px, py = -uy * arr * 0.4, ux * arr * 0.4
-        dpg.draw_triangle(
-            p1=p2,
-            p2=[ax + px, ay + py],
-            p3=[ax - px, ay - py],
-            color=color, fill=color,
-            parent="graph_layer")
-
-    def _export_regulon_targets(self):
-        """Export the current regulon's targets and weights to a CSV file."""
-        name = self.highlighted_tf
-        if not name or name not in self.regulons_json:
-            return
-        safe_name = name.replace('/', '_').replace('\\', '_')
-        dpg.configure_item("export_dialog",
-                           default_filename=f"{safe_name}_targets")
-        dpg.show_item("export_dialog")
-
-    def _on_export_selected(self, sender, app_data):
-        path = app_data.get('file_path_name', '')
-        if not path:
-            return
-        # ensure .csv extension
-        if not path.lower().endswith('.csv'):
-            path += '.csv'
-        name = self.highlighted_tf
-        if not name or name not in self.regulons_json:
-            return
-        gene_weights = self.regulons_json[name]["gene_weights"]
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in ('.pdf', '.svg'):
+            path += '.pdf'
+            ext   = '.pdf'
         try:
-            with open(path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(["gene", "weight"])
-                for gene, weight in sorted(gene_weights.items(),
-                                           key=lambda x: x[1], reverse=True):
-                    writer.writerow([gene, weight])
-            print(f"[export] {len(gene_weights)} targets written to {path}")
+            self._render_vector(path, ext)
+            print(f"[export] vector graphic written to {path}")
         except Exception as e:
             print(f"[export error] {e}")
 
-    # SubNetGrep
+    def _render_vector(self, path, ext):
+        """Re-draw the active graph into matplotlib and save as PDF or SVG.
+        Colours and sizes mirror whatever is currently set in the app.
+        """
+        pos        = self.pos
+        G          = self.G
+        sng_active = getattr(self, '_subnetgrep_active', False)
+        sng_roles  = getattr(self, '_subnetgrep_roles', {})
+        is_pkl     = self.viz_source == "PKL"
+        pkl_tfs    = self.pkl_tfs
+        hl_tf      = self.highlighted_tf
+        hl_tgt     = self.highlighted_targets
+        min_w      = self.min_weight
 
-    def _run_subnetgrep(self):
-        gene = dpg.get_value(self._subnetgrep_input).strip()
-        if not gene:
-            return
-        if not self.regulons_json:
-            return
-        self._subnetgrep_gene = gene
+        def _to_hex(rgba):
+            r, g, b = rgba[0], rgba[1], rgba[2]
+            a = rgba[3] / 255.0 if len(rgba) > 3 else 1.0
+            return (r/255, g/255, b/255, a)
 
-        # Direct TFs (red): regulons that target gene 
-        direct_tfs = {tf for tf, data in self.regulons_json.items()
-                      if gene in data["gene_weights"]}
+        clr_node    = _to_hex(self.clr_node)
+        clr_edge    = _to_hex(self.clr_edge)
+        clr_hl_tf   = _to_hex(self.clr_hl_tf)
+        clr_hl_tgt  = _to_hex(self.clr_hl_tgt)
+        clr_hl_edge = _to_hex(self.clr_hl_edge)
 
-        # CSV adjacencies (blue): neighbours of gene in CSV graph that share at least one direct TF
-        csv_neighbours = set()
-        if gene in self.G_csv:
-            csv_neighbours = set(self.G_csv.neighbors(gene))
-
-        blue_nodes = set()
-        for nb in csv_neighbours:
-            nb_tfs = {tf for tf, data in self.regulons_json.items()
-                      if nb in data["gene_weights"]}
-            if nb_tfs & direct_tfs:          # shares at least one red TF
-                blue_nodes.add(nb)
-
-        # Indirect TFs (purple): regulate blue nodes but not green 
-        indirect_tfs = set()
-        for nb in blue_nodes:
-            for tf, data in self.regulons_json.items():
-                if nb in data["gene_weights"] and tf not in direct_tfs:
-                    indirect_tfs.add(tf)
-
-        # Build subgraph
-        sub = nx.DiGraph()
-        sub.add_node(gene,        role="gene")
-        for tf in direct_tfs:    sub.add_node(tf,  role="direct_tf")
-        for nb in blue_nodes:    sub.add_node(nb,  role="adjacent")
-        for tf in indirect_tfs:  sub.add_node(tf,  role="indirect_tf")
-
-        # directed: TF → gene
-        for tf in direct_tfs:
-            w = self.regulons_json[tf]["gene_weights"].get(gene, 0.0)
-            sub.add_edge(tf, gene, w=w)
-
-        # undirected-style: gene — blue 
-        for nb in blue_nodes:
-            d = self.G_csv.get_edge_data(gene, nb) or {}
-            w = float(d.get('w', d.get('weight', 1.0)))
-            sub.add_edge(gene, nb, w=w, undirected=True)
-            sub.add_edge(nb, gene, w=w, undirected=True)
-
-        # directed: TF → blue
-        for tf in direct_tfs:
-            for nb in blue_nodes:
-                if nb in self.regulons_json.get(tf, {}).get("gene_weights", {}):
-                    w = self.regulons_json[tf]["gene_weights"][nb]
-                    sub.add_edge(tf, nb, w=w)
-
-        # directed: indirect TF → blue
-        for tf in indirect_tfs:
-            for nb in blue_nodes:
-                if nb in self.regulons_json.get(tf, {}).get("gene_weights", {}):
-                    w = self.regulons_json[tf]["gene_weights"][nb]
-                    sub.add_edge(tf, nb, w=w)
-
-        pos = self._layout_subnetgrep(gene, direct_tfs, blue_nodes,
-                                      indirect_tfs, sub)
-
-        self._subnetgrep_graph    = sub
-        self._subnetgrep_pos      = pos
-        self._subnetgrep_roles    = {
-            gene:  "gene",
-            **{tf: "direct_tf"   for tf in direct_tfs},
-            **{nb: "adjacent"    for nb in blue_nodes},
-            **{tf: "indirect_tf" for tf in indirect_tfs},
+        SNG_COLORS = {
+            "gene":        (50/255,  200/255,  80/255, 1.0),
+            "direct_tf":   (220/255,  60/255,  60/255, 1.0),
+            "adjacent":    (60/255,  130/255, 220/255, 1.0),
+            "indirect_tf": (160/255,  80/255, 200/255, 1.0),
         }
-        self._subnetgrep_active   = True
-        self._pre_subnetgrep_G    = self.G
-        self._pre_subnetgrep_pos  = dict(self.pos)
-        self.G   = sub
-        self.pos = pos
-        self._base_pos = dict(pos)
-        self._reset_view()
-        self._dirty = True
-        dpg.configure_item(self._subnetgrep_run_btn,  show=False)
-        dpg.configure_item(self._subnetgrep_exit_btn, show=True)
 
-    def _layout_subnetgrep(self, gene, direct_tfs, blue_nodes,
-                           indirect_tfs, sub):
-        """
-        Concentric ring layout:
-          centre      → gene of interest
-          ring 1      → direct TFs (red)
-          ring 2      → blue adjacency nodes
-          ring 3      → indirect TFs (purple)
-        """
-        pos = {gene: np.array([0.0, 0.0])}
+        # Scale node radius and edge width relative to the app's node_scale
+        # base_r is calibrated so node_scale=5 gives a reasonable PDF size
+        base_r = self.node_scale * 0.012
+        lw_base = self.edge_thickness * 0.6
 
-        def _ring(nodes, radius):
-            nodes = sorted(nodes)
-            n = max(len(nodes), 1)
-            return {nd: np.array([radius * np.cos(2*np.pi*k/n),
-                                  radius * np.sin(2*np.pi*k/n)])
-                    for k, nd in enumerate(nodes)}
+        fig, ax = plt.subplots(figsize=(14, 10))
+        fig.patch.set_alpha(0)
+        ax.set_facecolor("none")
+        ax.set_aspect('equal')
+        ax.axis('off')
 
-        n_d  = max(len(direct_tfs),   1)
-        n_b  = max(len(blue_nodes),   1)
-        n_i  = max(len(indirect_tfs), 1)
-
-        R1 = max(1.5, n_d * 0.35)
-        R2 = R1 + max(1.5, n_b * 0.25)
-        R3 = R2 + max(1.5, n_i * 0.25)
-
-        pos.update(_ring(direct_tfs,   R1))
-        pos.update(_ring(blue_nodes,   R2))
-        pos.update(_ring(indirect_tfs, R3))
-        return pos
-
-    def _exit_subnetgrep(self):
-        if not getattr(self, '_subnetgrep_active', False):
+        if not pos:
+            plt.close(fig)
             return
-        self._subnetgrep_active = False
-        self.G   = self._pre_subnetgrep_G
-        self.pos = self._pre_subnetgrep_pos
-        self._base_pos = dict(self.pos)
-        self._reset_view()
-        self._dirty = True
-        dpg.configure_item(self._subnetgrep_run_btn,  show=True)
-        dpg.configure_item(self._subnetgrep_exit_btn, show=False)
+
+        for u, v, d in G.edges(data=True):
+            if float(d.get('w', 0)) < min_w:
+                continue
+            if u not in pos or v not in pos:
+                continue
+
+            p1 = np.array(pos[u], dtype=float)
+            p2 = np.array(pos[v], dtype=float)
+
+            is_hl      = hl_tf and ((u == hl_tf and v in hl_tgt) or
+                                    (v == hl_tf and u in hl_tgt))
+            undirected = d.get('undirected', False)
+
+            if is_hl:
+                clr, lw, alpha = clr_hl_edge, lw_base * 2.5, 0.95
+            else:
+                clr, lw, alpha = clr_edge, lw_base, clr_edge[3]
+
+            if sng_active or (is_pkl and not undirected):
+                dp  = p2 - p1
+                ln  = np.linalg.norm(dp) + 1e-9
+                p2s = p2 - dp / ln * base_r
+                if undirected:
+                    ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                            color=clr[:3], lw=lw, alpha=alpha,
+                            solid_capstyle='round')
+                else:
+                    ax.annotate("", xy=p2s, xytext=p1,
+                                arrowprops=dict(arrowstyle="-|>",
+                                                color=clr[:3], lw=lw,
+                                                mutation_scale=8, alpha=alpha))
+            else:
+                ax.plot([p1[0], p2[0]], [p1[1], p2[1]],
+                        color=clr[:3], lw=lw, alpha=alpha,
+                        solid_capstyle='round')
+
+        n_nodes = G.number_of_nodes()
+
+        for node, p in pos.items():
+            if node not in G:
+                continue
+            x, y = float(p[0]), float(p[1])
+
+            if sng_active and node in sng_roles:
+                role   = sng_roles[node]
+                fc     = SNG_COLORS.get(role, clr_node)
+                r      = base_r * 2.2 if role in ("gene", "direct_tf") else base_r
+                zorder = 4 if role in ("gene", "direct_tf") else 3
+            elif is_pkl:
+                if node == hl_tf:
+                    fc, r, zorder = clr_hl_tf, base_r * 2.2, 5
+                elif node in pkl_tfs:
+                    fc, r, zorder = clr_hl_tf, base_r * 2.2, 4
+                elif node in hl_tgt:
+                    fc, r, zorder = clr_hl_tgt, base_r, 3
+                else:
+                    fc, r, zorder = clr_node, base_r, 2
+            else:
+                r, zorder = base_r, 3
+                if node == hl_tf:
+                    fc = clr_hl_tf
+                elif node in hl_tgt:
+                    fc = clr_hl_tgt
+                else:
+                    fc = clr_node
+
+            ax.add_patch(plt.Circle((x, y), r, color=fc, zorder=zorder))
+
+            show_label = (sng_active or node == hl_tf or node in hl_tgt or
+                          (is_pkl and node in pkl_tfs and n_nodes < 500))
+            if show_label:
+                ax.text(x + r * 1.15, y, str(node),
+                        fontsize=max(3.0, self.node_scale * 0.7),
+                        color=(0.88, 0.88, 0.88, 1.0),
+                        va='center', zorder=6)
+
+        pts = np.array(list(pos.values()), dtype=float)
+        mn, mx = pts.min(axis=0), pts.max(axis=0)
+        pad = (mx - mn).max() * 0.05 + base_r * 2
+        ax.set_xlim(mn[0] - pad, mx[0] + pad)
+        ax.set_ylim(mn[1] - pad, mx[1] + pad)
+
+        fig.savefig(path, format=ext.lstrip('.'),
+                    transparent=True, bbox_inches='tight', dpi=300)
+        plt.close(fig)
 
 if __name__ == "__main__":
     csv_path = sys.argv[1] if len(sys.argv) > 1 else "data.csv"
