@@ -2,7 +2,7 @@
 Collection of functions for large-scale downstream gene regulatory network analysis. Functions are currently adapted for use with pySCENIC. 
 
 ## App Changelog
-**03.2026:** Standalone NetGrep app is now available for testing! Features include:
+**03.19.2026:** Standalone NetGrep app is now available for testing! Features include:
 - Weight-based edge filtering
 - Custom layouts for GRNs (Spiral and GRN-Clusters) 
 - Aesthetic customization of network graphs
