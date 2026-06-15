@@ -28,18 +28,20 @@ Collection of functions for large-scale downstream gene regulatory network analy
 
 ## Previews 
 **Note: App is in early development and subject to change**
-<p align ="center">
-    <img width="460" height="300" alt="Screenshot 2026-03-19 at 4 50 10 PM" src="https://github.com/user-attachments/assets/891e7a89-c8de-4cda-8fad-75c9e877864a" />
-</p>
-<p align="center">Explore and adjust whole network diagrams.</p>
-<p align ="center">
-<img width="460" height="300" alt="Screenshot 2026-03-19 at 4 52 47 PM" src="https://github.com/user-attachments/assets/59a629c5-6d87-4e9f-a5d8-d2ad53c39734" />
-</p>
-<p align="center">Visualize subnetworks of regulons of interest.</p>
-<p align ="center">
+<div align="center">
+  <table>
+    <tr>
+      <td>
+        <img width="400" height="300" alt="Screenshot 2026-04-29 at 1 56 08 PM" src="https://github.com/user-attachments/assets/891e7a89-c8de-4cda-8fad-75c9e877864a" />
+    </td>
+    <td>
+      <img width="400" height="300" alt="Screenshot 2026-04-29 at 1 48 29 PM" src="https://github.com/user-attachments/assets/59a629c5-6d87-4e9f-a5d8-d2ad53c39734" />
+    </td>
+  </tr>
+</table> 
 <img width="460" height="300" alt="Screenshot 2026-03-19 at 4 53 10 PM" src="https://github.com/user-attachments/assets/60c281f6-2ba0-443c-bdcf-e9d19c2130f0" />
 </p>
-<p align="center">Query genes of interest and visualize meaningful regulatory connections.</p>
+<p align="center">
 
 
 
